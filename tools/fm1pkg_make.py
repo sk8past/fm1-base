@@ -147,6 +147,82 @@ def flash_image(app, key):
     return bytes(f)
 
 
+FLASH_SIZE_SMK = 0x9D000  # head (0x0-0x3FFF) + full app area (0x4000-0x9CFFF)
+
+
+def flash_image_smk(app, key):
+    """Build the SMK-37 flash image.
+
+    Layout differences from the FM-1:
+      - image covers [0, 0x9D000) — app area ends at 0x9D000 (VM/store starts there)
+      - region table uses SMK-37 addresses and protected areas
+      - VM: Felucca store + OTA staging (0x9D000-0xBFFFF = 0x23000)
+      - PRCT: head + app area (0x0-0x9D000); flags 0x92, resvd 0x82 (write-protected by loader)
+      - BTIF: (0xC0000, 0x2000); flags 0x92, resvd 0x82 (never written by the loader)
+      - USRTRIM: protected trim (0xC1000, 0x1000); flags 0x92, resvd 0x81 (never written)
+      - USRFLASH: user flash (0xC2000, 0x29000); flags 0x92, resvd 0x81
+      - USR: protected key/cal area (0xF4000, 0xA000); flags 0x92, resvd 0x81, index 1
+    The head (SPL, JLFS, isd_config) and app slot (app.bin, cfg_tool.bin) are identical.
+    The SFC key is the same chip key.
+    """
+    spl = sdk_file("uboot.boot")
+    cfg_tool = sdk_file("cfg_tool.bin")
+    eq = sdk_file("cfg/eq_cfg_hw.bin")
+    isd = key_blob(key) + b"[FELUCCA]\r\n"
+    f = bytearray(b"\xFF" * FLASH_SIZE_SMK)
+    # ---- head (identical to FM-1: SPL, isd_config, JLFS directory, key_mac pointer)
+    spl_off = 0xA0
+    isd_off = spl_off + len(spl)
+    assert isd_off + len(isd) <= 0x4000
+    f[spl_off:spl_off + len(spl)] = spl
+    f[isd_off:isd_off + len(isd)] = isd
+    top = (entry(crc16(spl), spl_off, len(spl), 0x00, 0x00, 0, "uboot.boot") +
+           entry(crc16(isd), isd_off, len(isd), 0x02, 0x80, 0, "isd_config.ini") +
+           entry(0xFFFF, 0x4000, 0xFFFFFFFF, 0x81, 0xFF, 0, "app_dir_head") +
+           entry(0xFFFF, 0xFF000, 0x1000, 0x12, 0x01, 0xFFFF, "key_mac"))
+    hdr = struct.pack("<H", crc16(FLASH_HDR)) + FLASH_HDR
+    head = bytearray(hdr + top)
+    for o in range(0, len(head), 32):
+        enc(head, o, 32)
+    f[0:len(head)] = head
+    # ---- app area (plain first, then SFC — same slot size as FM-1)
+    if len(app) > APP_SLOT:
+        raise SystemExit(f"app is {len(app)} B, the slot is {APP_SLOT} B")
+    app = app + b"\xFF" * (APP_SLOT - len(app))
+    blk = 0x120 + APP_SLOT + len(cfg_tool)
+    area = bytearray(b"\xFF" * blk)
+    area[0x120:0x120 + APP_SLOT] = app
+    area[0x120 + APP_SLOT:blk] = cfg_tool
+    ents = [entry(crc16(app), 0x120, APP_SLOT, 0x82, 0xFF, 0, "app.bin"),
+            entry(crc16(cfg_tool), 0x120 + APP_SLOT, len(cfg_tool), 0x82, 0xFF, 0, "cfg_tool.bin"),
+            # SMK-37 region descriptors (the bytes after the short names are SDK packer fields):
+            # VM: Felucca store + OTA staging [0x9D000, 0xC0000)
+            entry(0xFFFF, 0x9D000, 0x23000, 0x12, 0x81, 0,
+                  bytes.fromhex("564d00ffffffffffffffffff00800000")),
+            # PRCT: head + app area [0, 0x9D000); protected (loader will not write here)
+            entry(0xFFFF, 0, FLASH_SIZE_SMK, 0x92, 0x82, 0,
+                  bytes.fromhex("5052435400ffffffffffffff434f4445")),
+            # BTIF: Bluetooth interface area [0xC0000, 0xC2000)
+            entry(0xFFFF, 0xC0000, 0x2000, 0x92, 0x82, 0,
+                  bytes.fromhex("4254494600ffffffffffffff4155544f")),
+            # USRTRIM: protected calibration trim [0xC1000, 0xC2000) — never written by the loader
+            entry(0xFFFF, 0xC1000, 0x1000, 0x92, 0x81, 0, "USRTRIM"),
+            # USRFLASH: user flash [0xC2000, 0xEB000)
+            entry(0xFFFF, 0xC2000, 0x29000, 0x92, 0x81, 0, "USRFLASH"),
+            # USR: protected key / cal area [0xF4000, 0xFE000) — never written by the loader
+            entry(0xFFFF, 0xF4000, 0xA000, 0x92, 0x81, 1, "USR")]
+    area[32:32 + len(b"".join(ents))] = b"".join(ents)
+    area[0:32] = entry(crc16(area[32:blk]), 0x02000120, blk, 0x83, 0xFF, 0, "app_area_head")
+    # nested cfg directory: SDK default EQ table (same as FM-1)
+    eq_e = entry(crc16(eq), 0x40, len(eq), 0x82, 0xFF, 1, "eq_cfg_hw.bin")
+    cfg_body = eq_e + eq
+    cfg = entry(crc16(cfg_body), 0x20, 0x20 + len(cfg_body), 0x83, 0xFF, 1, "cfg") + cfg_body
+    region = bytearray(area + cfg)
+    sfc(region, 0, len(region), 0, key)
+    f[0x4000:0x4000 + len(region)] = region
+    return bytes(f)
+
+
 def ufw(flash, ota, product):
     files = [(0, "flash.bin", flash), (100, "ota.bin", ota)]
     off, ents, data = 0x400, [], bytearray()

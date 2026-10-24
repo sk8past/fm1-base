@@ -94,6 +94,7 @@ VERSION = None                      # APP_VERSION for release builds (default: "
 BLE = False                         # fm1.toml ble = true, unless --no-ble
 WIFI = False                        # fm1.toml wifi = true
 STEM = None                         # the build's file names: NAME, or NAME-usb (--no-ble)
+BOARD = "fm1"                       # target board: fm1 (default) or smk37; set by --board / BOARD env var
 BT_SYMS = ("btstack_init", "bt_ble_init", "bt_max_pwr_set", "le_controller_set_mac", "lmp_set_sniff_disable",
            "shim_os_init", "ble_midi_send_many")
 
@@ -253,7 +254,10 @@ def ldr_wrap(image):
 def build_loader():
     LDR.mkdir(parents=True, exist_ok=True)
     src = BSP / "loader"
-    flags = [*CFLAGS, *inc(BSP / "chip", BSP / "boards" / "fm1")]
+    board_dir = BSP / "boards" / BOARD
+    flags = [*CFLAGS, *inc(BSP / "chip", board_dir)]
+    if BOARD == "smk37":
+        flags += ["-DBOARD_SMK37=1"]
     tc_all(("cc", "-c", src / "crt0_ldr.S", "-o", LDR / "crt0_ldr.o"),
            ("cc", *flags, "-c", src / "loader.c", "-o", LDR / "loader.o"))
     elf = LDR / "loader.elf"
@@ -407,8 +411,12 @@ def radio_units():
 
 
 def build_app():
-    flags = [*CFLAGS, *FPU, *inc(BSP / "chip", BSP / "boards" / "fm1", SRC / "device", SRC / "include", SRC / "lib", APP, GEN,
+    board_dir = BSP / "boards" / BOARD
+    flags = [*CFLAGS, *FPU, *inc(BSP / "chip", board_dir, SRC / "device", SRC / "include", SRC / "lib", APP, GEN,
                                  *(APP / d for d in CONF.get("include", []) + CONF.get("device_include", [])))]
+    if BOARD == "smk37":
+        flags += ["-DBOARD_SMK37=1",
+                  "-DFM1B_TRS=0"]   # PH8 is a matrix row on SMK — TRS MIDI IN is not available
     if BLE:
         flags += ["-DFM1B_BLE=1", *inc(SRC / "ble" / "shim")]
         if CONF.get("ble_central"):
@@ -418,10 +426,15 @@ def build_app():
     for key, flag in (("usb_audio_in", "FM1B_UAC"), ("usb_audio_out", "FM1B_UAC_OUT")):
         if key in CONF and flag not in os.environ:
             flags.append(f"-D{flag}={int(bool(CONF[key]))}")
-    for flag in ("FM1B_CDC", "FM1B_UAC", "FM1B_UAC_OUT", "FM1B_TRS"):
+    for flag in ("FM1B_CDC", "FM1B_UAC", "FM1B_UAC_OUT"):
+        # FM1B_TRS: forced to 0 for SMK37 above; for fm1 the env var or the platform default applies
         v = os.environ.get(flag)    # unset: fm1.toml's, the app's (app.h) or the platform's default (device/unity.c)
         if v in ("0", "1"):
             flags.append(f"-D{flag}={v}")
+    if BOARD != "smk37":
+        v = os.environ.get("FM1B_TRS")
+        if v in ("0", "1"):
+            flags.append(f"-DFM1B_TRS={v}")
     flags.append(f'-DFELUCCA_ID="{PRODUCT}"')
     for key, macro in (("usb_manufacturer", "FELUCCA_USB_MANUFACTURER"), ("usb_product", "FELUCCA_USB_PRODUCT")):
         if CONF.get(key):
@@ -605,7 +618,7 @@ def mmio_check():
         s = re.sub(r"/\*.*?\*/", lambda m: "\n" * m.group(0).count("\n"), s, flags=re.S)
         return re.sub(r"//[^\n]*", "", s)
     defs = {}
-    for h in sorted([*(BSP / "chip").glob("*.h"), *(BSP / "boards" / "fm1").glob("*.h")]):
+    for h in sorted([*(BSP / "chip").glob("*.h"), *(BSP / "boards" / BOARD).glob("*.h")]):
         for m in re.finditer(r"^#define\s+(\w+)(?:\([^)]*\))?\s+(.*)$", strip(h.read_text()), re.M):
             defs[m.group(1)] = m.group(2)
     regs = {n for n, b in defs.items() if re.search(r"\bvolatile\b", b)}
@@ -725,7 +738,7 @@ def build_web():
 
 
 def main():
-    global PRODUCT, VERSION, APP, OUT, GEN, LDR, ROOT, CONF, NAME, BLE, WIFI, STEM
+    global PRODUCT, VERSION, APP, OUT, GEN, LDR, ROOT, CONF, NAME, BLE, WIFI, STEM, BOARD
     ap = argparse.ArgumentParser()
     ap.add_argument("app", type=Path, help="the app's directory (with fm1.toml)")
     ap.add_argument("--release", metavar="X.Y[.Z]", help="release build: identity id_prefix + XXYYZZ, version string X.Y[.Z]")
@@ -733,7 +746,10 @@ def main():
     ap.add_argument("--sdk", type=Path, help="JieLi AC79 SDK checkout (default: $AC79_SDK)")
     ap.add_argument("--host", action="store_true", help="build the host simulator instead of the firmware")
     ap.add_argument("--web", action="store_true", help="build the browser emulator instead of the firmware")
+    ap.add_argument("--board", choices=["fm1", "smk37"], default=os.environ.get("BOARD", "fm1"),
+                    help="target board: fm1 (default) or smk37; overrides the BOARD env var")
     a = ap.parse_args()
+    BOARD = a.board
     APP = a.app.resolve()
     CONF = read_conf(APP / "fm1.toml")
     NAME = CONF.get("name", APP.name).lower()
@@ -745,20 +761,34 @@ def main():
     OUT = APP / "build"
     GEN, LDR = OUT / "gen", OUT / "loader"
     ROOT = Path(os.path.commonpath([SRC, APP]))
-    prefix = CONF.get("id_prefix", "FM-1_0")
-    if not re.fullmatch(r"FM-1_\d+", prefix):
-        raise SystemExit(f"fm1.toml id_prefix {prefix!r}: FM-1_ and digits only (the update tools parse it)")
-    PRODUCT = prefix + "00"
-    name = STEM + ".fwsc"
-    if a.release:
-        # identity: the prefix + major, minor, patch as two digits each (0.1 -> FM-1_0000100): FM-1 is the
-        # model the update tools match on; the digits after the underscore are the firmware's.
-        m = re.fullmatch(r"(\d{1,2})\.(\d{1,2})(?:\.(\d{1,2}))?(-[A-Za-z0-9]+)?", a.release)
-        if not m:
-            raise SystemExit(f"--release {a.release}: use X.Y[.Z][-suffix], up to two digits each")
-        PRODUCT = prefix + "%02d%02d%02d" % (int(m[1]), int(m[2]), int(m[3] or 0))
-        VERSION = a.release.upper()
-        name = f"{STEM}-{a.release}.fwsc"
+    if BOARD == "smk37":
+        # SMK-37 identity: "SMK-37 Pro_9XXYYZZ" (release) or "SMK-37 Pro_900" (dev).
+        # build.py's FM-1 id_prefix regex does not apply; the installer matches "SMK-37" instead.
+        STEM = NAME + "-smk37" + ("-usb" if CONF.get("ble") and not BLE else "")
+        name = STEM + ".fwsc"
+        PRODUCT = "SMK-37 Pro_900"
+        if a.release:
+            m = re.fullmatch(r"(\d{1,2})\.(\d{1,2})(?:\.(\d{1,2}))?(-[A-Za-z0-9]+)?", a.release)
+            if not m:
+                raise SystemExit(f"--release {a.release}: use X.Y[.Z][-suffix], up to two digits each")
+            PRODUCT = "SMK-37 Pro_9%02d%02d%02d" % (int(m[1]), int(m[2]), int(m[3] or 0))
+            VERSION = a.release.upper()
+            name = f"{STEM}-{a.release}.fwsc"
+    else:
+        prefix = CONF.get("id_prefix", "FM-1_0")
+        if not re.fullmatch(r"FM-1_\d+", prefix):
+            raise SystemExit(f"fm1.toml id_prefix {prefix!r}: FM-1_ and digits only (the update tools parse it)")
+        PRODUCT = prefix + "00"
+        name = STEM + ".fwsc"
+        if a.release:
+            # identity: the prefix + major, minor, patch as two digits each (0.1 -> FM-1_0000100): FM-1 is the
+            # model the update tools match on; the digits after the underscore are the firmware's.
+            m = re.fullmatch(r"(\d{1,2})\.(\d{1,2})(?:\.(\d{1,2}))?(-[A-Za-z0-9]+)?", a.release)
+            if not m:
+                raise SystemExit(f"--release {a.release}: use X.Y[.Z][-suffix], up to two digits each")
+            PRODUCT = prefix + "%02d%02d%02d" % (int(m[1]), int(m[2]), int(m[3] or 0))
+            VERSION = a.release.upper()
+            name = f"{STEM}-{a.release}.fwsc"
     if a.host or a.web:
         generate()
         return build_host() if a.host else build_web()
@@ -793,7 +823,10 @@ def main():
                                             for f in APP.glob("*.h")))]
     print("parts    " + ", ".join(n for n, x in parts if x) + "  (not built in: " +
           (", ".join(n for n, x in parts if not x) or "none") + ")")
-    pkg = fm1pkg_make.ufw(fm1pkg_make.flash_image(img, fm1pkg_make.KEY), ota, PRODUCT)
+    if BOARD == "smk37":
+        pkg = fm1pkg_make.ufw(fm1pkg_make.flash_image_smk(img, fm1pkg_make.KEY), ota, PRODUCT)
+    else:
+        pkg = fm1pkg_make.ufw(fm1pkg_make.flash_image(img, fm1pkg_make.KEY), ota, PRODUCT)
     (OUT / name).write_bytes(pkg)
     print(f"app      {OUT / (NAME + '.bin')}  {len(img)} B")
     print(f"loader   {LDR / 'ota.bin'}  {len(ota)} B")
