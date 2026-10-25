@@ -41,6 +41,7 @@
  * makes the readings a key gives, from app_host_tick (every millisecond) while plat_sense is on.
  * FM1B_SAID_LOG=FILE: a reader listens from boot, quietly, and every SAY is appended to FILE (the audit).
  */
+#define _POSIX_C_SOURCE 199309L  /* clock_gettime, CLOCK_MONOTONIC — must precede all system headers */
 #define PLAT_HOST 1
 #include <stdio.h>
 #include <stdlib.h>
