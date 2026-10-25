@@ -28,6 +28,7 @@ run trs sh -c "$CC -O2 -w -Ibsp/chip -Ibsp/boards/fm1 -Idevice -o $OUT/trs_test 
 run storage sh -c "$CC -O2 -w -o $OUT/storage_test tests/storage_test.c && $OUT/storage_test"
 run fastmath sh -c "$CC -O2 -w -o $OUT/fastmath_test tests/fastmath_test.c -lm && $OUT/fastmath_test"
 run installer "$PY" tests/install_test.py
+run smk-owner sh -c "$CC -O2 -w -o $OUT/smk_owner_test tests/smk_owner_test.c && $OUT/smk_owner_test"
 PKG=template/build/template.fwsc
 if [ -f "$PKG" ]; then
     run ota-entry sh -c "$CC -w -o $OUT/ota_test tests/ota_test.c && $OUT/ota_test $PKG"
