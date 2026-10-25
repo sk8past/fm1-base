@@ -40,6 +40,12 @@ uint32_t plat_buttons(void)
     for (i = 0; i < NB; i++)
         if (raw & (1u << panel.btn[i]))
             out |= 1u << i;
+    /* SMK-37 extra buttons: KNOB BANK=id 0, FADER BANK=id 1, <=id 2, >=id 3.
+     * These are not in panel.btn[] (NB=14 entries), so we map them directly. */
+    if (raw & (1u << 0)) out |= 1u << B_KNOB_BANK;
+    if (raw & (1u << 1)) out |= 1u << B_FADER_BANK;
+    if (raw & (1u << 2)) out |= 1u << B_PREV;
+    if (raw & (1u << 3)) out |= 1u << B_NEXT;
     return out | remote.btn;
 }
 
@@ -131,6 +137,85 @@ void smk_fader_reset_takeover(void)
     int i;
     for (i = 0; i < 4; i++)
         fader_taken[i] = 0;
+}
+
+/* ---- wheels: pitch bend (±2 semitones) and mod wheel (CC1) ----------------------- */
+/* smk_wheels_tick: call once per main-loop frame (from ui_frame via ui.c BOARD_SMK37 guard).
+ *
+ * Pitch wheel (smk_an.pitch, mux C addr 4): 10-bit ADC, centre = rest.
+ * Self-calibrating: the first 32 frames establish the zero point; afterwards a dead-band
+ * of ±8 counts around zero is held quiet.  Range maps ±(512 - dead) → ±8192 (MIDI 14-bit).
+ * 2 semitones of bend = ±2/48 × 8192 ≈ ±341; the synth uses ±2 st as well.
+ *
+ * Mod wheel (smk_an.mod, mux C addr 5): 10-bit, 0 = off, 1023 = full.
+ * Sent as CC1 on proj.chan; suppressed when the value has not changed. */
+
+#define WHEEL_CALIB_FRAMES 32u
+#define WHEEL_DEAD         8       /* ±counts around centre suppressed */
+
+static struct {
+    uint16_t pitch_zero;           /* calibrated rest value */
+    uint8_t  calib_left;           /* frames remaining in calibration */
+    uint32_t pitch_sum;            /* accumulator for calibration */
+    int16_t  last_bend;            /* last sent pitch bend (avoid retransmit) */
+    uint8_t  last_mod;             /* last sent mod CC value */
+} smk_whl = {512, WHEEL_CALIB_FRAMES, 0, 0, 0xFF};
+
+void smk_wheels_tick(void)
+{
+    extern project_t proj;
+    uint32_t ch = proj.chan & 0xFu;
+
+    /* --- pitch wheel --- */
+    {
+        int16_t raw  = (int16_t)smk_an.pitch;   /* 0..1023 */
+        int16_t bend;
+
+        if (smk_whl.calib_left) {
+            smk_whl.pitch_sum += (uint32_t)raw;
+            smk_whl.calib_left--;
+            if (!smk_whl.calib_left)
+                smk_whl.pitch_zero = (uint16_t)(smk_whl.pitch_sum / WHEEL_CALIB_FRAMES);
+        }
+
+        {
+            int32_t delta = (int32_t)raw - (int32_t)smk_whl.pitch_zero;
+            if (delta > -WHEEL_DEAD && delta < WHEEL_DEAD)
+                delta = 0;
+            else if (delta > 0)
+                delta -= WHEEL_DEAD;
+            else
+                delta += WHEEL_DEAD;
+            /* Scale: full ADC half-range (512 - WHEEL_DEAD) → ±8192 */
+            bend = (int16_t)((delta * 8192) / (512 - WHEEL_DEAD));
+            if (bend >  8191) bend =  8191;
+            if (bend < -8192) bend = -8192;
+        }
+
+        if (bend != smk_whl.last_bend) {
+            smk_whl.last_bend = bend;
+            {
+                /* MIDI pitch bend: 14-bit, LSB first.  Offset by 8192 for unsigned wire format. */
+                uint32_t val  = (uint32_t)(bend + 8192);
+                uint32_t lsb  = val & 0x7Fu;
+                uint32_t msb  = (val >> 7) & 0x7Fu;
+                uint32_t pkt  = (0x0Eu << 24) | ((0xE0u | ch) << 16) | (lsb << 8) | msb;
+                plat_midi_out(pkt);
+            }
+        }
+    }
+
+    /* --- mod wheel (CC1) --- */
+    {
+        uint8_t mod = (uint8_t)(smk_an.mod >> 3);   /* 10-bit → 7-bit */
+        if (mod != smk_whl.last_mod) {
+            smk_whl.last_mod = mod;
+            {
+                uint32_t pkt = (0x0Bu << 24) | ((0xB0u | ch) << 16) | (1u << 8) | mod;
+                plat_midi_out(pkt);
+            }
+        }
+    }
 }
 
 /* ---- LEDs ------------------------------------------------------------------------ */

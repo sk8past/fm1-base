@@ -21,6 +21,12 @@
  * calls the second button SCL, the panel prints SEL) */
 enum { B_FX, B_SEL, B_ENV, B_LFO, B_EDIT, B_GLO, B_HOME, B_SAVE, B_ARP, B_SEQ, B_PLAY, B_REC,
        B_OCTDN, B_OCTUP, NB };
+/* SMK-37 only: 4 extra buttons not present on the FM-1; ids 14..17 extend the B_* enum.
+ * NB remains 14 so FM-1 code (plat_fm1.c, plat_lights loop) is unchanged.
+ * These are only used behind BOARD_SMK37 guards in app/ui.c and plat_smk37.c. */
+#if BOARD_SMK37
+enum { B_KNOB_BANK = NB, B_FADER_BANK, B_PREV, B_NEXT, NB_SMK };
+#endif
 enum { EN_SELECT, EN_ALGO, EN_PRESET, EN_K1, EN_K2, EN_K3, EN_K4, NE };
 
 #define NKEYS 27                       /* F3 .. G5 */
