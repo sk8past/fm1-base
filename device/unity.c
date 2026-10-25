@@ -183,7 +183,11 @@ static int ann_wire_send(const uint8_t *p, uint32_t n)   /* never waits: no room
 #if FM1B_WIFI
 #include "wifi.c"                 /* WiFi (ble/wifi/, the SDK's lwIP) */
 #endif
+#if BOARD_SMK37
+#include "plat_smk37.c"
+#else
 #include "plat_fm1.c"
+#endif
 #ifdef APP_TOUCH
 #include "touch.c"
 #endif

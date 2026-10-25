@@ -336,22 +336,43 @@ static int remote_frame(const uint8_t *p, uint32_t n)
         return 0;
     switch (p[3]) {
     case 1:
-        if (n >= 6u)
-            remote.btn = ((uint32_t)p[4] | (uint32_t)p[5] << 7) & ((1u << NB) - 1u);
+        if (n >= 6u) {
+            uint32_t m = ((uint32_t)p[4] | (uint32_t)p[5] << 7) & ((1u << NB) - 1u);
+#if BOARD_SMK37
+            smk_remote_btn(m);
+#else
+            remote.btn = m;
+#endif
+        }
         break;
     case 2:
-        if (n >= 8u)
-            remote.keys = ((uint32_t)p[4] | (uint32_t)p[5] << 7 | (uint32_t)p[6] << 14 | (uint32_t)p[7] << 21) &
-                          ((1u << NKEYS) - 1u);
+        if (n >= 8u) {
+            uint32_t m = ((uint32_t)p[4] | (uint32_t)p[5] << 7 | (uint32_t)p[6] << 14 | (uint32_t)p[7] << 21) &
+                         ((1u << NKEYS) - 1u);
+#if BOARD_SMK37
+            smk_remote_keys(m);
+#else
+            remote.keys = m;
+#endif
+        }
         break;
     case 3:
-        if (n >= 6u && p[4] < NE)
+        if (n >= 6u && p[4] < NE) {
+#if BOARD_SMK37
+            smk_remote_enc((int)p[4], (int32_t)p[5] - 64);
+#else
             remote.enc[p[4]] += (int32_t)p[5] - 64;
+#endif
+        }
         break;
     case 4:
         if (n >= 6u) {
             uint32_t v = (uint32_t)p[4] | (uint32_t)p[5] << 7;
+#if BOARD_SMK37
+            smk_remote_master(v > 4096u ? -1 : (int32_t)v);
+#else
             remote.master = v > 4096u ? -1 : (int32_t)v;
+#endif
         }
         break;
     default:
@@ -608,7 +629,9 @@ static void splash(void)                           /* the app's (APP_SPLASH), or
 
 static void fm1_main(void)
 {
+#if !BOARD_SMK37
     int32_t knob = 512 * 16;
+#endif
     uint32_t last_frame = 0;
     {
         uint32_t f = irq_save();
@@ -616,7 +639,7 @@ static void fm1_main(void)
         fm1_sysvdd_raise(15);                       /* then 1.38 V (fm1_sys.h). At the boot loader's, flash fetches
                                                      * come back corrupted under load: the radio's trim crashed
                                                      * CTL-1 0.6 s into most Bluetooth starts */
-        flash_ok = FL_FAR(fl_jedec_ram)() == 0x856014u;   /* the expected 1 MiB part, else RAM only */
+        flash_ok = FL_JEDEC_OK(FL_FAR(fl_jedec_ram)());   /* board-specific JEDEC check (fm1_flash_map.h) */
         irq_restore(f);
         if (flash_ok) {
             ota_boot_cleanup();
@@ -652,7 +675,11 @@ static void fm1_main(void)
     fm1_input_init();
     fm1_adc_init();
     panel_init();
+#if BOARD_SMK37
+    smk_panel_init();          /* apply SMK-37 default if flash blank; defined in plat_smk37.c */
+#else
     led_pos_init();
+#endif
     app_init();                                     /* the app's engine and its saved state (or defaults) */
     audio_init();
     usb_start();
@@ -684,6 +711,7 @@ static void fm1_main(void)
             bootguard.pending = 0;
             bootguard.failed = 0;
         }
+#if !BOARD_SMK37
         {   /* MASTER: smoothed, 0..4092; with the keys' readings on, the scan owns the converter and reads it too */
             int32_t a = fm1_an.con || fm1_an.pend ? (int32_t)fm1_an.master : fm1_adc_read(FM1_ADC_MASTER);
             if (a >= 0) {
@@ -691,6 +719,11 @@ static void fm1_main(void)
                 master_pos = remote.master >= 0 ? (uint32_t)remote.master : (uint32_t)(knob / 4);
             }
         }
+#else
+        /* SMK-37: MASTER is virtual (K1 encoder accumulated in fm1_an.master by fm1_input.h).
+         * plat_master() reads fm1_an.master and applies any remote override. */
+        master_pos = plat_master();
+#endif
         fm1b_dbg.stage = 2;                         /* (breadcrumbs: where a watchdog reset found the loop) */
         ble_poll();                                 /* Bluetooth's tasks, once started */
 #if FM1B_WIFI

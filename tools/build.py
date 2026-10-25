@@ -415,8 +415,10 @@ def build_app():
     flags = [*CFLAGS, *FPU, *inc(BSP / "chip", board_dir, SRC / "device", SRC / "include", SRC / "lib", APP, GEN,
                                  *(APP / d for d in CONF.get("include", []) + CONF.get("device_include", [])))]
     if BOARD == "smk37":
+        smk_model_env = os.environ.get("MODEL", "pro").lower()
         flags += ["-DBOARD_SMK37=1",
-                  "-DFM1B_TRS=0"]   # PH8 is a matrix row on SMK — TRS MIDI IN is not available
+                  "-DFM1B_TRS=0",   # PH8 is a matrix row on SMK — TRS MIDI IN is not available
+                  f'-DSMK_MODEL="{smk_model_env}"']   # model identity string ("pro", "elite", "mke")
     if BLE:
         flags += ["-DFM1B_BLE=1", *inc(SRC / "ble" / "shim")]
         if CONF.get("ble_central"):
@@ -762,16 +764,29 @@ def main():
     GEN, LDR = OUT / "gen", OUT / "loader"
     ROOT = Path(os.path.commonpath([SRC, APP]))
     if BOARD == "smk37":
-        # SMK-37 identity: "SMK-37 Pro_9XXYYZZ" (release) or "SMK-37 Pro_900" (dev).
-        # build.py's FM-1 id_prefix regex does not apply; the installer matches "SMK-37" instead.
-        STEM = NAME + "-smk37" + ("-usb" if CONF.get("ble") and not BLE else "")
+        # SMK-37 identity: "<model-name>_9XXYYZZ" (release) or "<model-name>_900" (dev).
+        # build.py's FM-1 id_prefix regex does not apply; the installer matches by model prefix.
+        # MODEL env var selects the hardware variant (default: pro):
+        #   MODEL=pro   → "SMK-37 Pro_9XX"  file: NAME-smk37.fwsc     (also for Starrykey 37 Play)
+        #   MODEL=elite → "SMK-37 Elite_9XX" file: NAME-smk37-elite.fwsc
+        #   MODEL=mke   → "MKE-P37_9XX"     file: NAME-smk37-mke.fwsc
+        SMK_MODEL = os.environ.get("MODEL", "pro").lower()
+        SMK_MODEL_NAMES = {
+            "pro":   ("SMK-37 Pro",   "-smk37"),
+            "elite": ("SMK-37 Elite", "-smk37-elite"),
+            "mke":   ("MKE-P37",      "-smk37-mke"),
+        }
+        if SMK_MODEL not in SMK_MODEL_NAMES:
+            raise SystemExit(f"MODEL={SMK_MODEL!r}: must be pro, elite or mke")
+        model_name, model_suffix = SMK_MODEL_NAMES[SMK_MODEL]
+        STEM = NAME + model_suffix + ("-usb" if CONF.get("ble") and not BLE else "")
         name = STEM + ".fwsc"
-        PRODUCT = "SMK-37 Pro_900"
+        PRODUCT = f"{model_name}_900"
         if a.release:
             m = re.fullmatch(r"(\d{1,2})\.(\d{1,2})(?:\.(\d{1,2}))?(-[A-Za-z0-9]+)?", a.release)
             if not m:
                 raise SystemExit(f"--release {a.release}: use X.Y[.Z][-suffix], up to two digits each")
-            PRODUCT = "SMK-37 Pro_9%02d%02d%02d" % (int(m[1]), int(m[2]), int(m[3] or 0))
+            PRODUCT = f"{model_name}_9%02d%02d%02d" % (int(m[1]), int(m[2]), int(m[3] or 0))
             VERSION = a.release.upper()
             name = f"{STEM}-{a.release}.fwsc"
     else:
